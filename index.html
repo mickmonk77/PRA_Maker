@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DayZ PRA Teleport Exporter</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root{
+    --bg-deep:#0d1210;
+    --panel:#141a17;
+    --panel-2:#1b221d;
+    --border:#2a332c;
+    --amber:#c9a24b;
+    --amber-dim:#8a713a;
+    --olive:#6b8f5e;
+    --text:#d8ddd4;
+    --text-dim:#8a9388;
+    --green:#7ac76e;
+    --red:#e06046;
+    --mono:'IBM Plex Mono','SF Mono',Consolas,monospace;
+    --sans:'Inter',system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;background:var(--bg-deep);color:var(--text);font-family:var(--sans);}
+  #app{display:flex;height:100vh;width:100vw;}
+
+  #panel{
+    width:340px;min-width:340px;
+    background:var(--panel);
+    border-right:1px solid var(--border);
+    display:flex;flex-direction:column;
+    overflow-y:auto;
+  }
+  #panel h1{
+    font-size:14px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--amber);margin:0;padding:18px 18px 4px;
+    font-weight:600;
+  }
+  #panel .sub{
+    padding:0 18px 16px;color:var(--text-dim);font-size:12px;
+    border-bottom:1px solid var(--border);
+  }
+  .section{padding:16px 18px;border-bottom:1px solid var(--border);}
+  .section h2{
+    font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--olive);margin:0 0 10px;font-weight:600;
+  }
+  label{display:block;font-size:11px;color:var(--text-dim);margin:10px 0 4px;}
+  label:first-child{margin-top:0;}
+  select{
+    width:100%;background:var(--bg-deep);border:1px solid var(--border);
+    color:var(--text);padding:8px;border-radius:3px;font-family:var(--mono);
+    font-size:12px;
+  }
+  input[type=text],input[type=password],input[type=number]{
+    width:100%;background:var(--bg-deep);border:1px solid var(--border);
+    color:var(--text);padding:7px 8px;border-radius:3px;font-family:var(--mono);
+    font-size:12px;
+  }
+  input[type=text]:focus,input[type=password]:focus,input[type=number]:focus{outline:1px solid var(--amber-dim);}
+  .hint{font-size:10px;color:var(--text-dim);margin-top:8px;line-height:1.5;}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+
+  button{
+    width:100%;padding:10px;border-radius:3px;border:1px solid var(--border);
+    background:var(--panel-2);color:var(--text);font-family:var(--sans);
+    font-size:12px;font-weight:600;letter-spacing:.03em;cursor:pointer;
+    transition:background .15s,border-color .15s;
+  }
+  button:hover:not(:disabled){border-color:var(--amber-dim);}
+  button.primary{background:var(--amber);color:#181410;border-color:var(--amber);}
+  button.primary:hover:not(:disabled){background:#dcb35c;}
+  button.fromBtn.active{background:var(--green);color:#0d1210;border-color:var(--green);}
+  button.toBtn.active{background:var(--red);color:#0d1210;border-color:var(--red);}
+  button:disabled{opacity:.35;cursor:not-allowed;}
+  button+button{margin-top:8px;}
+  .btnrow{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .btnrow button+button{margin-top:0;}
+
+  #status,#terrainStatus,#markerStatus,#genStatus{
+    font-family:var(--mono);font-size:11px;color:var(--text-dim);
+    white-space:pre-line;line-height:1.6;margin-top:10px;
+  }
+  .ok{color:var(--olive);}
+  .warn{color:var(--amber);}
+  .err{color:#c96b4b;}
+
+  #mapwrap{position:relative;flex:1;}
+  #map{position:absolute;inset:0;background:#050705;}
+  .leaflet-container{background:#050705;font-family:var(--sans);cursor:crosshair;}
+
+  #coordsBox{
+    position:absolute;bottom:16px;right:16px;z-index:1000;
+    background:rgba(20,26,23,.92);border:1px solid var(--border);
+    border-radius:4px;padding:8px 12px;font-family:var(--mono);
+    font-size:11px;color:var(--amber);pointer-events:none;letter-spacing:.02em;
+  }
+  .pra-marker{
+    width:14px;height:14px;border-radius:50%;
+    border:2px solid #0d1210;box-shadow:0 0 6px 1px rgba(0,0,0,.6);
+    cursor:pointer;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="panel">
+    <h1>PRA Teleport Exporter</h1>
+    <div class="sub">Click FROM/TO points on the map, export a PRA teleport JSON.</div>
+
+    <div class="section">
+      <h2>1 — GitHub access</h2>
+      <label>Tiles/data token</label>
+      <input type="password" id="ghToken" placeholder="ghp_...">
+      <label>Heightmap token</label>
+      <input type="password" id="ghTokenTerrain" placeholder="ghp_...">
+      <div class="hint">Passwords cached locally. If both tokens have full access to both repos you can use the same one twice.</div>
+    </div>
+
+    <div class="section">
+      <h2>2 — Map</h2>
+      <select id="mapSelect">
+        <option value="Chernarus">Chernarus</option>
+        <option value="Livonia">Livonia</option>
+        <option value="Sakhal">Sakhal</option>
+      </select>
+      <div id="status">Loading Chernarus…</div>
+      <div id="terrainStatus"></div>
+    </div>
+
+    <div class="section">
+      <h2>3 — Area parameters</h2>
+      <label>Area name</label>
+      <input type="text" id="areaName" placeholder="LootRoomToSol3">
+      <label>Size (X, Y, Z)</label>
+      <div class="row3">
+        <input type="number" id="sizeX" value="2" step="0.1">
+        <input type="number" id="sizeY" value="2" step="0.1">
+        <input type="number" id="sizeZ" value="2" step="0.1">
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>4 — Mark locations</h2>
+      <button id="fromBtn" class="fromBtn">FROM</button>
+      <button id="toBtn" class="toBtn">TO</button>
+      <div class="btnrow" style="margin-top:8px;">
+        <button id="clearFromBtn">Clear FROM</button>
+        <button id="clearToBtn">Clear TO</button>
+      </div>
+      <button id="clearAllBtn">Clear all</button>
+      <div id="markerStatus">FROM: 0   TO: 0</div>
+      <div class="hint">Click FROM or TO, then click the map to drop markers — no limit. Click a marker to remove it.</div>
+    </div>
+
+    <div class="section">
+      <h2>5 — Generate</h2>
+      <button id="generateBtn" class="primary">Generate JSON</button>
+      <div id="genStatus"></div>
+    </div>
+  </div>
+
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="coordsBox">X —   Z —</div>
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  // ---------- per-map presets ----------
+  const MAP_DEFAULTS = {
+    Chernarus: { worldSize: 15360, tileUrl: 'tiles/chernarus/{z}/{x}/{y}.webp', maxZoom: 7, tms: false },
+    Livonia:   { worldSize: 12800, tileUrl: 'tiles/livonia/{z}/{x}/{y}.webp',   maxZoom: 7, tms: false },
+    Sakhal:    { worldSize: 15360, tileUrl: 'tiles/sakhal/{z}/{x}/{y}.webp',    maxZoom: 7, tms: false }
+  };
+  const TERRAIN_FILES = {
+    Chernarus: 'dayz-terrain-chernarusplus.json',
+    Livonia:   'dayz-terrain-livonia.json',
+    Sakhal:    'dayz-terrain-sakhal.json'
+  };
+
+  // ---------- GitHub access ----------
+  const GH_OWNER = atob('bWlja21vbms3Nw==');
+  const GH_REPO_TILES = atob('T2JqZWN0RXh0cmFjdG9y');   // ObjectExtractor — tiles
+  const GH_REPO_TERRAIN = 'HeightAndSlope';               // heightmap JSONs
+  const GH_BRANCH = atob('bWFpbg==');
+  const LS_TOKEN_KEY = 'oe_gh_token';
+  const LS_TOKEN_KEY_TERRAIN = 'oe_gh_token_terrain';
+
+  function ghToken(){ return el('ghToken').value.trim(); }
+  function ghTokenTerrain(){ return el('ghTokenTerrain').value.trim(); }
+  // GitHub fine-grained PATs are scoped per-repo, so the tiles/data repo and
+  // the heightmap repo may each need their own token.
+  function tokenForRepo(repo){ return repo === GH_REPO_TERRAIN ? ghTokenTerrain() : ghToken(); }
+  function ghApiHeaders(token){
+    return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
+  }
+  function b64ToBytes(b64){
+    const binary = atob(b64.replace(/\n/g, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  // Fetches a file from a private repo via the Contents API (Bearer auth).
+  // Files under 1MB come back inline as base64; above that we follow up
+  // against the Git Blobs API (works up to 100MB).
+  async function ghFetchBytes(repo, path, signal){
+    const token = tokenForRepo(repo);
+    if (!token) return { status: 'error', message: 'no token set' };
+    const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+    const url = `https://api.github.com/repos/${GH_OWNER}/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(GH_BRANCH)}`;
+    try{
+      const res = await fetch(url, { headers: ghApiHeaders(token), signal });
+      if (res.status === 404) return { status: 'missing' };
+      if (res.status === 401) return { status: 'error', message: 'Unauthorized — check the token' };
+      if (res.status === 403) return { status: 'error', message: 'Forbidden — token permissions insufficient or rate limited' };
+      if (!res.ok) return { status: 'error', message: `GitHub error ${res.status}` };
+
+      const data = await res.json();
+      if (data.content && data.encoding === 'base64'){
+        return { status: 'ok', bytes: b64ToBytes(data.content) };
+      }
+      if (data.sha){
+        const blobUrl = `https://api.github.com/repos/${GH_OWNER}/${repo}/git/blobs/${data.sha}`;
+        const blobRes = await fetch(blobUrl, { headers: ghApiHeaders(token), signal });
+        if (!blobRes.ok) return { status: 'error', message: `GitHub error ${blobRes.status}` };
+        const blob = await blobRes.json();
+        if (blob.content && blob.encoding === 'base64'){
+          return { status: 'ok', bytes: b64ToBytes(blob.content) };
+        }
+      }
+      return { status: 'error', message: 'Could not read file content from GitHub' };
+    } catch(err){
+      if (err && err.name === 'AbortError') return { status: 'stale' };
+      return { status: 'error', message: (err && err.message) || 'network error' };
+    }
+  }
+
+  // ---------- state ----------
+  let currentMap = 'Chernarus';
+  let map = null;
+  let tileLayer = null;
+  let gridLayer = null;
+  let placingMode = null; // 'from' | 'to' | null
+  let fromMarkers = []; // {x,z,marker}
+  let toMarkers = [];
+  const state = { terrain: null };
+
+  // tile cache, keyed by repo path
+  const tileCache = {};
+  const tileInflight = {};
+  function createLimiter(maxConcurrent){
+    let active = 0;
+    const queue = [];
+    function runNext(){
+      if (active >= maxConcurrent || queue.length === 0) return;
+      active++;
+      const job = queue.shift();
+      job.fn().then(job.resolve, job.reject).finally(()=>{ active--; runNext(); });
+    }
+    return function limit(fn){
+      return new Promise((resolve, reject)=>{
+        queue.push({ fn, resolve, reject });
+        runNext();
+      });
+    };
+  }
+  const tileLimiter = createLimiter(6);
+  const tileNeeded = {};
+  const tileAbortControllers = {};
+
+  const el = id => document.getElementById(id);
+
+  el('ghToken').value = localStorage.getItem(LS_TOKEN_KEY) || '';
+  el('ghToken').addEventListener('change', ()=>{
+    localStorage.setItem(LS_TOKEN_KEY, ghToken());
+    initMap();
+  });
+  el('ghTokenTerrain').value = localStorage.getItem(LS_TOKEN_KEY_TERRAIN) || '';
+  el('ghTokenTerrain').addEventListener('change', ()=>{
+    localStorage.setItem(LS_TOKEN_KEY_TERRAIN, ghTokenTerrain());
+    loadTerrainForMap(currentMap);
+  });
+
+  // ---------- CRS / map setup ----------
+  function buildCRS(worldSize, tileSize){
+    const scaleAtZoom0 = tileSize / worldSize;
+    return L.extend({}, L.CRS.Simple, {
+      transformation: new L.Transformation(scaleAtZoom0, 0, scaleAtZoom0, 0)
+    });
+  }
+  function worldToLatLng(x, z, worldSize){ return L.latLng(worldSize - z, x); }
+  function latLngToWorld(latlng, worldSize){ return { x: latlng.lng, z: worldSize - latlng.lat }; }
+
+  const BLANK_TILE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+  function startTileFetch(path){
+    const p = tileLimiter(() => {
+      if ((tileNeeded[path] || 0) <= 0) return Promise.resolve({ status: 'stale' });
+      const controller = new AbortController();
+      tileAbortControllers[path] = controller;
+      return ghFetchBytes(GH_REPO_TILES, path, controller.signal);
+    }).then(result=>{
+      delete tileAbortControllers[path];
+      if (result.status === 'stale') return undefined;
+      if (result.status === 'missing'){ tileCache[path] = null; return null; }
+      if (result.status === 'error'){
+        if (!window._ghTileWarned){
+          window._ghTileWarned = true;
+          el('status').innerHTML = `<span class="err">Tile load failed: ${result.message}</span>`;
+        }
+        return undefined;
+      }
+      const blob = new Blob([result.bytes], { type: 'image/webp' });
+      const objUrl = URL.createObjectURL(blob);
+      tileCache[path] = objUrl;
+      return objUrl;
+    }).finally(()=>{ delete tileInflight[path]; });
+    tileInflight[path] = p;
+    return p;
+  }
+  function resolveTile(path){
+    if (tileCache[path] !== undefined) return Promise.resolve(tileCache[path]);
+    if (tileInflight[path]){
+      return tileInflight[path].then(url=>{
+        if (url === undefined && (tileNeeded[path] || 0) > 0) return startTileFetch(path);
+        return url;
+      });
+    }
+    return startTileFetch(path);
+  }
+
+  const AuthTileLayer = L.TileLayer.extend({
+    createTile: function(coords, done){
+      const img = document.createElement('img');
+      let x = coords.x, y = coords.y;
+      const z = coords.z;
+      if (this.options.tms) y = Math.pow(2, z) - 1 - y;
+      const path = this._url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+      tileNeeded[path] = (tileNeeded[path] || 0) + 1;
+      resolveTile(path).then(url=>{
+        img.src = (url === null || url === undefined) ? BLANK_TILE : url;
+        done(null, img);
+      });
+      return img;
+    }
+  });
+
+  function onTileUnload(e){
+    let x = e.coords.x, y = e.coords.y;
+    const z = e.coords.z;
+    const cfg = MAP_DEFAULTS[currentMap];
+    if (cfg.tms) y = Math.pow(2, z) - 1 - y;
+    const path = cfg.tileUrl.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+    tileNeeded[path] = (tileNeeded[path] || 1) - 1;
+    if (tileNeeded[path] <= 0 && tileAbortControllers[path]){
+      tileAbortControllers[path].abort();
+      delete tileAbortControllers[path];
+    }
+  }
+
+  // ---------- 1000m grid overlay ----------
+  function buildGrid(worldSize){
+    const group = L.layerGroup();
+    const lineColor = 'rgba(201,162,75,0.38)';
+    for (let x = 0; x <= worldSize; x += 1000){
+      group.addLayer(L.polyline(
+        [worldToLatLng(x, 0, worldSize), worldToLatLng(x, worldSize, worldSize)],
+        { color: lineColor, weight: 1, interactive: false }
+      ));
+    }
+    for (let z = 0; z <= worldSize; z += 1000){
+      group.addLayer(L.polyline(
+        [worldToLatLng(0, z, worldSize), worldToLatLng(worldSize, z, worldSize)],
+        { color: lineColor, weight: 1, interactive: false }
+      ));
+    }
+    return group;
+  }
+
+  // ---------- terrain sampling (ported from Terrain Placer) ----------
+  function lerp(a, b, t){ return a + (b - a) * t; }
+  function sampleHeight(x, z){
+    const t = state.terrain;
+    if (!t) return { height: 0, inBounds: false };
+    const fx = (x - t.minX) / t.step;
+    const fz = (z - t.minZ) / t.step;
+    const inBounds = fx >= 0 && fx <= t.cols - 1 && fz >= 0 && fz <= t.rows - 1;
+    const cx = Math.min(Math.max(fx, 0), t.cols - 1);
+    const cz = Math.min(Math.max(fz, 0), t.rows - 1);
+    const x0 = Math.floor(cx), x1 = Math.min(x0 + 1, t.cols - 1);
+    const z0 = Math.floor(cz), z1 = Math.min(z0 + 1, t.rows - 1);
+    const tx = cx - x0, tz = cz - z0;
+    const h00 = t.arr[z0 * t.cols + x0], h10 = t.arr[z0 * t.cols + x1];
+    const h01 = t.arr[z1 * t.cols + x0], h11 = t.arr[z1 * t.cols + x1];
+    return { height: lerp(lerp(h00, h10, tx), lerp(h01, h11, tx), tz), inBounds };
+  }
+
+  async function loadTerrainForMap(mapName){
+    state.terrain = null;
+    const fname = TERRAIN_FILES[mapName];
+    if (!fname) return;
+    if (!ghTokenTerrain()){ el('terrainStatus').innerHTML = ''; return; }
+    el('terrainStatus').innerHTML = `<span class="warn">Loading terrain…</span>`;
+    const result = await ghFetchBytes(GH_REPO_TERRAIN, fname);
+    if (result.status !== 'ok'){
+      el('terrainStatus').innerHTML = `<span class="err">Terrain load failed: ${result.message || result.status}</span>`;
+      return;
+    }
+    try{
+      const text = new TextDecoder('utf-8').decode(result.bytes);
+      const data = JSON.parse(text);
+      const grid = data.grid;
+      const arr = (data.arrays && (data.arrays.surfaceY || data.arrays.height || data.arrays.y)) || null;
+      if (!grid || !arr) throw new Error('missing grid/arrays.surfaceY');
+      state.terrain = {
+        minX: grid.minX, minZ: grid.minZ, maxX: grid.maxX, maxZ: grid.maxZ,
+        step: grid.step, cols: grid.cols, rows: grid.rows,
+        arr: Float64Array.from(arr, v => (v < 0 ? 0 : v))
+      };
+      el('terrainStatus').innerHTML = `<span class="ok">Terrain loaded (${grid.cols}x${grid.rows} @ ${grid.step}m)</span>`;
+    } catch(err){
+      el('terrainStatus').innerHTML = `<span class="err">Terrain parse error: ${err.message}</span>`;
+    }
+  }
+
+  // ---------- map init ----------
+  function initMap(){
+    window._ghTileWarned = false;
+    const cfg = MAP_DEFAULTS[currentMap];
+    if (map) { map.remove(); map = null; }
+
+    const tileSize = 256;
+    const CRS = buildCRS(cfg.worldSize, tileSize);
+
+    map = L.map('map', {
+      crs: CRS, minZoom: 0, maxZoom: cfg.maxZoom,
+      zoomControl: false, attributionControl: false, maxBoundsViscosity: 0.4
+    });
+    L.control.zoom({ position: 'topright' }).addTo(map);
+
+    tileLayer = new AuthTileLayer(cfg.tileUrl, {
+      minZoom: 0, maxZoom: cfg.maxZoom, tileSize: tileSize,
+      noWrap: true, tms: cfg.tms, errorTileUrl: ''
+    }).addTo(map);
+    tileLayer.on('tileunload', onTileUnload);
+
+    const full = tileSize * Math.pow(2, cfg.maxZoom);
+    const pad = full * 0.25;
+    map.setMaxBounds([[-pad, -pad], [full + pad, full + pad]]);
+    map.fitBounds([[0,0],[full,full]], { padding: [30, 30] });
+
+    if (gridLayer) gridLayer.remove();
+    gridLayer = buildGrid(cfg.worldSize).addTo(map);
+
+    // re-plant existing markers on the new map instance (same map switch keeps them in the marker arrays)
+    fromMarkers.forEach(m => { m.marker = plantMarker('from', m.x, m.z); });
+    toMarkers.forEach(m => { m.marker = plantMarker('to', m.x, m.z); });
+
+    map.on('mousemove', onMouseMove);
+    map.on('click', onMapClick);
+
+    window._worldSize = cfg.worldSize;
+    el('status').innerHTML = `<span class="ok">${currentMap} loaded.</span>`;
+    loadTerrainForMap(currentMap);
+    updateMarkerCounts();
+  }
+
+  el('mapSelect').addEventListener('change', ()=>{
+    currentMap = el('mapSelect').value;
+    initMap();
+  });
+
+  // ---------- marker placement ----------
+  function onMouseMove(e){
+    const w = latLngToWorld(e.latlng, window._worldSize);
+    const cx = Math.min(window._worldSize, Math.max(0, w.x));
+    const cz = Math.min(window._worldSize, Math.max(0, w.z));
+    el('coordsBox').textContent = `X ${cx.toFixed(0)}   Z ${cz.toFixed(0)}`;
+  }
+
+  function setMode(mode){
+    placingMode = (placingMode === mode) ? null : mode;
+    el('fromBtn').classList.toggle('active', placingMode === 'from');
+    el('toBtn').classList.toggle('active', placingMode === 'to');
+    el('fromBtn').textContent = placingMode === 'from' ? 'Placing FROM… (click map)' : 'FROM';
+    el('toBtn').textContent = placingMode === 'to' ? 'Placing TO… (click map)' : 'TO';
+  }
+
+  function onMapClick(e){
+    if (!placingMode) return;
+    const w = latLngToWorld(e.latlng, window._worldSize);
+    addMarker(placingMode, w.x, w.z);
+  }
+
+  function plantMarker(type, x, z){
+    const color = type === 'from' ? 'var(--green)' : 'var(--red)';
+    const icon = L.divIcon({
+      className: '', html: `<div class="pra-marker" style="background:${color}"></div>`,
+      iconSize: [14,14], iconAnchor: [7,7]
+    });
+    const marker = L.marker(worldToLatLng(x, z, window._worldSize), { icon, interactive: true }).addTo(map);
+    marker.bindTooltip(`${type.toUpperCase()}  X ${x.toFixed(1)}  Z ${z.toFixed(1)}`, { direction: 'top', offset: [0,-8] });
+    return marker;
+  }
+
+  function addMarker(type, x, z){
+    const marker = plantMarker(type, x, z);
+    const entry = { x, z, marker };
+    marker.on('click', (ev)=>{
+      L.DomEvent.stopPropagation(ev);
+      removeMarker(type, entry);
+    });
+    (type === 'from' ? fromMarkers : toMarkers).push(entry);
+    updateMarkerCounts();
+  }
+
+  function removeMarker(type, entry){
+    if (map) map.removeLayer(entry.marker);
+    const arr = type === 'from' ? fromMarkers : toMarkers;
+    const idx = arr.indexOf(entry);
+    if (idx >= 0) arr.splice(idx, 1);
+    updateMarkerCounts();
+  }
+
+  function clearMarkers(type){
+    const arr = type === 'from' ? fromMarkers : toMarkers;
+    arr.forEach(m => { if (map) map.removeLayer(m.marker); });
+    arr.length = 0;
+    updateMarkerCounts();
+  }
+
+  function updateMarkerCounts(){
+    el('markerStatus').textContent = `FROM: ${fromMarkers.length}   TO: ${toMarkers.length}`;
+  }
+
+  el('fromBtn').addEventListener('click', ()=> setMode('from'));
+  el('toBtn').addEventListener('click', ()=> setMode('to'));
+  el('clearFromBtn').addEventListener('click', ()=> clearMarkers('from'));
+  el('clearToBtn').addEventListener('click', ()=> clearMarkers('to'));
+  el('clearAllBtn').addEventListener('click', ()=>{ clearMarkers('from'); clearMarkers('to'); });
+
+  // ---------- generate ----------
+  function round2(v){ return Math.round(v * 100) / 100; }
+  function heightAt(x, z){ return round2(sampleHeight(x, z).height); }
+
+  el('generateBtn').addEventListener('click', ()=>{
+    const areaName = el('areaName').value.trim();
+    const sizeX = parseFloat(el('sizeX').value), sizeY = parseFloat(el('sizeY').value), sizeZ = parseFloat(el('sizeZ').value);
+
+    if (!areaName){ el('genStatus').innerHTML = `<span class="err">Area name is required.</span>`; return; }
+    if ([sizeX, sizeY, sizeZ].some(v => isNaN(v))){ el('genStatus').innerHTML = `<span class="err">Size X/Y/Z must be numbers.</span>`; return; }
+    if (!fromMarkers.length){ el('genStatus').innerHTML = `<span class="err">Add at least one FROM marker.</span>`; return; }
+    if (!toMarkers.length){ el('genStatus').innerHTML = `<span class="err">Add at least one TO marker.</span>`; return; }
+    if (!state.terrain){ el('genStatus').innerHTML = `<span class="err">Terrain not loaded yet — check token/map.</span>`; return; }
+
+    const PRABoxes = fromMarkers.map(m => [
+      [sizeX, sizeY, sizeZ],
+      [0, 0, 0],
+      [round2(m.x), heightAt(m.x, m.z), round2(m.z)]
+    ]);
+    const safePositions3D = toMarkers.map(m => [round2(m.x), heightAt(m.x, m.z), round2(m.z)]);
+
+    const payload = { areaName, PRABoxes, safePositions3D };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const hh = pad(now.getHours()), mi = pad(now.getMinutes());
+    const dd = pad(now.getDate()), mo = pad(now.getMonth() + 1);
+    const safeName = areaName.replace(/[^a-z0-9_\-]/gi, '_');
+    const filename = `PRA_${safeName}_${hh}${mi}_${dd}${mo}.json`;
+
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    el('genStatus').innerHTML = `<span class="ok">Exported ${filename}</span>\n${PRABoxes.length} FROM box(es), ${safePositions3D.length} TO position(s)`;
+  });
+
+  initMap();
+})();
+</script>
+</body>
+</html>

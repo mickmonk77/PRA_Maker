@@ -120,8 +120,10 @@
       <h2>1 — GitHub access<span class="badge" id="ghBadge"></span></h2>
       <label>Tiles/data token</label>
       <input type="password" id="ghToken" placeholder="ghp_...">
+      <div class="hint" id="ghTokenStatus"></div>
       <label>Heightmap token</label>
-      <input type="password" id="ghTokenTerrain" placeholder="ghp_...">
+      <input type="password" id="ghTokenTerrain" placeholder="ghp_... (blank = use main token)">
+      <div class="hint" id="ghTokenTerrainStatus"></div>
       <div class="hint">Passwords cached locally. If both tokens have full access to both repos you can use the same one twice.</div>
     </div>
 
@@ -207,7 +209,7 @@
   function ghTokenTerrain(){ return el('ghTokenTerrain').value.trim(); }
   // GitHub fine-grained PATs are scoped per-repo, so the tiles/data repo and
   // the heightmap repo may each need their own token.
-  function tokenForRepo(repo){ return repo === GH_REPO_TERRAIN ? ghTokenTerrain() : ghToken(); }
+  function tokenForRepo(repo){ return repo === GH_REPO_TERRAIN ? (ghTokenTerrain() || ghToken()) : ghToken(); }
   function ghApiHeaders(token){
     return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
   }
@@ -221,16 +223,43 @@
   // Fetches a file from a private repo via the Contents API (Bearer auth).
   // Files under 1MB come back inline as base64; above that we follow up
   // against the Git Blobs API (works up to 100MB).
-  async function ghFetchBytes(repo, path, signal){
+  async function ghFetchBytes(repo, path, signal, raw){
     const token = tokenForRepo(repo);
     if (!token) return { status: 'error', message: 'no token set' };
     const encodedPath = path.split('/').map(encodeURIComponent).join('/');
     const url = `https://api.github.com/repos/${GH_OWNER}/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(GH_BRANCH)}`;
     try{
+      if (raw){
+        // Raw media type returns the file body directly (up to 100MB) — used for the big heightmap JSONs.
+        const rr = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw+json' }, signal });
+        if (rr.status === 404) return { status: 'error', message: `${path} not found — usually the token has no access to the ${repo} repo` };
+        if (rr.status === 401) return { status: 'error', message: 'Unauthorized — check the heightmap token' };
+        if (rr.status === 403) return { status: 'error', message: 'Forbidden — token permissions insufficient or rate limited' };
+        if (!rr.ok) return { status: 'error', message: `GitHub error ${rr.status}` };
+        return { status: 'ok', bytes: new Uint8Array(await rr.arrayBuffer()) };
+      }
       const res = await fetch(url, { headers: ghApiHeaders(token), signal });
       if (res.status === 404) return { status: 'missing' };
       if (res.status === 401) return { status: 'error', message: 'Unauthorized — check the token' };
-      if (res.status === 403) return { status: 'error', message: 'Forbidden — token permissions insufficient or rate limited' };
+      if (res.status === 403){
+        // GitHub answers 403 "too_large" from the Contents API for files over 1MB —
+        // that is a size limit, not a permissions problem. Fetch the raw bytes instead (up to 100MB).
+        let body = ''; try{ body = await res.text(); }catch(_){}
+        if (/too[_ ]large/i.test(body)){
+          try{
+            const rawRes = await fetch(url, {
+              headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw+json' }, signal
+            });
+            if (rawRes.ok) return { status: 'ok', bytes: new Uint8Array(await rawRes.arrayBuffer()) };
+            return { status: 'error', message: `Large file download failed (HTTP ${rawRes.status})` };
+          } catch(err){
+            if (err && err.name === 'AbortError') throw err;
+            return { status: 'error', message: `Large file download failed: ${err.message}` };
+          }
+        }
+        let ghMsg = ''; try{ ghMsg = JSON.parse(body).message || ''; }catch(_){}
+        return { status: 'error', message: `Forbidden — token permissions insufficient or rate limited${ghMsg ? ' (' + ghMsg + ')' : ''}` };
+      }
       if (!res.ok) return { status: 'error', message: `GitHub error ${res.status}` };
 
       const data = await res.json();
@@ -319,29 +348,59 @@
     h.addEventListener('click', ()=> h.parentElement.classList.toggle('collapsed'));
   });
 
-  // GitHub section: collapses once BOTH tokens authenticate, expands if either fails
-  const ghAuth = { tiles: null, terrain: null };   // null = unknown, true = ok, false = failed
-  function updateGhSection(){
-    const sec = el('ghSection'), badge = el('ghBadge');
-    if (ghAuth.tiles === false || ghAuth.terrain === false){
-      sec.classList.remove('collapsed');
-      badge.innerHTML = '<span class="err">token problem</span>';
-    } else if (ghAuth.tiles === true && ghAuth.terrain === true){
-      sec.classList.add('collapsed');
-      badge.innerHTML = '<span class="ok">\u2713 connected</span>';
-    } else {
-      badge.textContent = '';
+  // ---------- token validation + auto-minimise of the GitHub section ----------
+  // Each token is checked directly against its repo. Both valid -> section minimises;
+  // either invalid -> it opens so the problem is visible.
+  let tokenCheckSeq = 0, tokensWereBothValid = false;
+  async function checkRepoAccess(repo, token){
+    if (!token) return { ok: false, message: 'No token entered' };
+    try{
+      const res = await fetch(`https://api.github.com/repos/${GH_OWNER}/${repo}`, { headers: ghApiHeaders(token) });
+      if (res.ok) return { ok: true };
+      if (res.status === 401) return { ok: false, message: 'Unauthorized — invalid or expired token' };
+      if (res.status === 404) return { ok: false, message: 'Token has no access to this repo' };
+      if (res.status === 403) return { ok: false, message: 'Forbidden — token permissions insufficient or rate limited' };
+      return { ok: false, message: `GitHub error ${res.status}` };
+    } catch(err){
+      return { ok: false, message: (err && err.message) || 'network error' };
     }
+  }
+  async function validateTokens(){
+    const seq = ++tokenCheckSeq;
+    const mainTok = ghToken();
+    const heightBlank = !ghTokenTerrain();
+    const heightTok = tokenForRepo(GH_REPO_TERRAIN);   // falls back to the main token when blank
+    const sec = el('ghSection'), badge = el('ghBadge');
+    const setSt = (id, msg, cls) => { el(id).innerHTML = msg ? `<span class="${cls || ''}">${msg}</span>` : ''; };
+    if (!mainTok && !heightTok){
+      setSt('ghTokenStatus', ''); setSt('ghTokenTerrainStatus', '');
+      badge.textContent = ''; tokensWereBothValid = false; sec.classList.remove('collapsed');
+      return;
+    }
+    setSt('ghTokenStatus', mainTok ? 'Checking…' : 'Enter a token', mainTok ? 'warn' : 'err');
+    setSt('ghTokenTerrainStatus', heightTok ? 'Checking…' : 'Enter a token', heightTok ? 'warn' : 'err');
+    badge.innerHTML = '<span class="warn">checking…</span>';
+    const [m, h] = await Promise.all([checkRepoAccess(GH_REPO_TILES, mainTok), checkRepoAccess(GH_REPO_TERRAIN, heightTok)]);
+    if (seq !== tokenCheckSeq) return;   // a newer check superseded this one
+    setSt('ghTokenStatus', m.ok ? 'Valid — tiles/data access confirmed' : m.message, m.ok ? 'ok' : 'err');
+    setSt('ghTokenTerrainStatus', h.ok ? 'Valid — heightmap access confirmed' + (heightBlank ? ' (using the main token)' : '') : h.message, h.ok ? 'ok' : 'err');
+    const both = m.ok && h.ok;
+    badge.innerHTML = both ? '<span class="ok">\u2713 both tokens valid</span>' : '<span class="err">\u26a0 check tokens</span>';
+    if (both && !tokensWereBothValid) sec.classList.add('collapsed');   // minimise once everything is good
+    if (!both) sec.classList.remove('collapsed');                        // reopen so the problem is visible
+    tokensWereBothValid = both;
   }
 
   el('ghToken').value = localStorage.getItem(LS_TOKEN_KEY) || '';
   el('ghToken').addEventListener('change', ()=>{
     localStorage.setItem(LS_TOKEN_KEY, ghToken());
+    validateTokens();
     initMap();
   });
   el('ghTokenTerrain').value = localStorage.getItem(LS_TOKEN_KEY_TERRAIN) || '';
   el('ghTokenTerrain').addEventListener('change', ()=>{
     localStorage.setItem(LS_TOKEN_KEY_TERRAIN, ghTokenTerrain());
+    validateTokens();
     loadTerrainForMap(currentMap);
   });
 
@@ -368,15 +427,13 @@
       if (result.status === 'stale') return undefined;
       if (result.status === 'missing'){ tileCache[path] = null; return null; }
       if (result.status === 'error'){
-        ghAuth.tiles = false; updateGhSection();
         if (!window._ghTileWarned){
           window._ghTileWarned = true;
           el('status').innerHTML = `<span class="err">Tile load failed: ${result.message}</span>`;
         }
         return undefined;
       }
-      if (ghAuth.tiles !== false){ ghAuth.tiles = true; updateGhSection(); }
-      const blob = new Blob([result.bytes], { type: 'image/webp' });
+            const blob = new Blob([result.bytes], { type: 'image/webp' });
       const objUrl = URL.createObjectURL(blob);
       tileCache[path] = objUrl;
       return objUrl;
@@ -463,18 +520,15 @@
 
   async function loadTerrainForMap(mapName){
     state.terrain = null;
-    ghAuth.terrain = null; updateGhSection();
     const fname = TERRAIN_FILES[mapName];
     if (!fname) return;
-    if (!ghTokenTerrain()){ el('terrainStatus').innerHTML = ''; return; }
+    if (!tokenForRepo(GH_REPO_TERRAIN)){ el('terrainStatus').innerHTML = ''; return; }
     el('terrainStatus').innerHTML = `<span class="warn">Loading terrain…</span>`;
-    const result = await ghFetchBytes(GH_REPO_TERRAIN, fname);
+    const result = await ghFetchBytes(GH_REPO_TERRAIN, fname, undefined, true);
     if (result.status !== 'ok'){
-      ghAuth.terrain = false; updateGhSection();
       el('terrainStatus').innerHTML = `<span class="err">Terrain load failed: ${result.message || result.status}</span>`;
       return;
     }
-    ghAuth.terrain = true; updateGhSection();
     try{
       const text = new TextDecoder('utf-8').decode(result.bytes);
       const data = JSON.parse(text);
@@ -504,7 +558,6 @@
   // ---------- map init ----------
   function initMap(){
     window._ghTileWarned = false;
-    ghAuth.tiles = null; updateGhSection();
     const cfg = MAP_DEFAULTS[currentMap];
     if (map) { map.remove(); map = null; }
 
@@ -658,6 +711,7 @@
     el('genStatus').innerHTML = `<span class="ok">Exported ${filename}</span>\n${PRABoxes.length} FROM box(es), ${safePositions3D.length} TO position(s)`;
   });
 
+  validateTokens();   // page load: confirm cached tokens (minimises the GitHub section if both are good)
   initMap();
 })();
 </script>

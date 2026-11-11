@@ -125,6 +125,7 @@
         <option value="Chernarus">Chernarus</option>
         <option value="Livonia">Livonia</option>
         <option value="Sakhal">Sakhal</option>
+        <option value="Nasdara">Nasdara</option>
       </select>
       <div id="status">Loading Chernarus…</div>
       <div id="terrainStatus"></div>
@@ -178,12 +179,14 @@
   const MAP_DEFAULTS = {
     Chernarus: { worldSize: 15360, tileUrl: 'tiles/chernarus/{z}/{x}/{y}.webp', maxZoom: 7, tms: false },
     Livonia:   { worldSize: 12800, tileUrl: 'tiles/livonia/{z}/{x}/{y}.webp',   maxZoom: 7, tms: false },
-    Sakhal:    { worldSize: 15360, tileUrl: 'tiles/sakhal/{z}/{x}/{y}.webp',    maxZoom: 7, tms: false }
+    Sakhal:    { worldSize: 15360, tileUrl: 'tiles/sakhal/{z}/{x}/{y}.webp',    maxZoom: 7, tms: false },
+    Nasdara:   { worldSize: 16380, tileUrl: 'tiles/nasdara/{z}/{x}/{y}.webp',   maxZoom: 7, tms: false }
   };
   const TERRAIN_FILES = {
     Chernarus: 'dayz-terrain-chernarusplus.json',
     Livonia:   'dayz-terrain-livonia.json',
-    Sakhal:    'dayz-terrain-sakhal.json'
+    Sakhal:    'dayz-terrain-sakhal.json',
+    Nasdara:   'dayz-terrain-nasdara.json'
   };
 
   // ---------- GitHub access ----------
@@ -418,9 +421,18 @@
     try{
       const text = new TextDecoder('utf-8').decode(result.bytes);
       const data = JSON.parse(text);
-      const grid = data.grid;
-      const arr = (data.arrays && (data.arrays.surfaceY || data.arrays.height || data.arrays.y)) || null;
-      if (!grid || !arr) throw new Error('missing grid/arrays.surfaceY');
+      let grid, arr;
+      if (data.heights && data.size && data.spacing){
+        // Nasdara format: flat heights[z*size + x], x/z = index*spacing, origin 0,0
+        const max = (data.size - 1) * data.spacing;
+        grid = { minX: 0, minZ: 0, maxX: max, maxZ: max, step: data.spacing, cols: data.size, rows: data.size };
+        arr = data.heights;
+        if (arr.length !== data.size * data.size) throw new Error(`heights length ${arr.length} != size^2 (${data.size * data.size})`);
+      } else {
+        grid = data.grid;
+        arr = (data.arrays && (data.arrays.surfaceY || data.arrays.height || data.arrays.y)) || null;
+      }
+      if (!grid || !arr) throw new Error('missing grid/arrays.surfaceY or heights/size/spacing');
       state.terrain = {
         minX: grid.minX, minZ: grid.minZ, maxX: grid.maxX, maxZ: grid.maxZ,
         step: grid.step, cols: grid.cols, rows: grid.rows,

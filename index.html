@@ -102,6 +102,14 @@
     border-radius:4px;padding:8px 12px;font-family:var(--mono);
     font-size:11px;color:var(--amber);pointer-events:none;letter-spacing:.02em;
   }
+  .leaflet-tooltip{white-space:pre;font-family:var(--mono);font-size:11px;}
+  .pra-marker.manual{border-color:#fff;box-shadow:0 0 6px 2px rgba(255,255,255,.35);}
+  .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--bg-deep);color:var(--text);border:1px solid var(--border);border-radius:2px;}
+  .leaflet-popup-content{margin:10px 12px;font-family:var(--mono);font-size:11px;}
+  .mk-pop .ttl{color:var(--amber);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px;}
+  .mk-pop .row{display:flex;gap:6px;margin-top:6px;}
+  .mk-pop input{width:90px;}
+  .mk-pop button{padding:4px 8px;}
   .pra-marker{
     width:14px;height:14px;border-radius:50%;
     border:2px solid #0d1210;box-shadow:0 0 6px 1px rgba(0,0,0,.6);
@@ -161,7 +169,7 @@
       </div>
       <button id="clearAllBtn">Clear all</button>
       <div id="markerStatus">FROM: 0   TO: 0</div>
-      <div class="hint">Click FROM or TO, then click the map to drop markers — no limit. Click a marker to remove it.</div>
+      <div class="hint">Click FROM or TO, then click the map to drop markers — no limit. Hover a marker to see its height. Click a marker to set a manual height, reset it to terrain, or remove it. Markers with a manual height have a white ring and export that height.</div>
     </div>
 
     <div class="section">
@@ -585,8 +593,8 @@
     gridLayer = buildGrid(cfg.worldSize).addTo(map);
 
     // re-plant existing markers on the new map instance (same map switch keeps them in the marker arrays)
-    fromMarkers.forEach(m => { m.marker = plantMarker('from', m.x, m.z); });
-    toMarkers.forEach(m => { m.marker = plantMarker('to', m.x, m.z); });
+    fromMarkers.forEach(m => { m.marker = plantMarker('from', m); });
+    toMarkers.forEach(m => { m.marker = plantMarker('to', m); });
 
     map.on('mousemove', onMouseMove);
     map.on('click', onMapClick);
@@ -624,24 +632,74 @@
     addMarker(placingMode, w.x, w.z);
   }
 
-  function plantMarker(type, x, z){
+  // entry = { x, z, y (manual height override, or null = use terrain), marker }
+  function markerHeight(entry){
+    if (entry.y != null) return { h: entry.y, manual: true };
+    const sm = sampleHeight(entry.x, entry.z);
+    if (!state.terrain) return { h: null, manual: false };
+    return { h: round2(sm.height), manual: false, outOfBounds: !sm.inBounds };
+  }
+
+  function tipText(type, entry){
+    const mh = markerHeight(entry);
+    let hs;
+    if (mh.h == null) hs = 'height n/a (terrain not loaded)';
+    else hs = `Y ${mh.h.toFixed(2)}${mh.manual ? ' (manual)' : mh.outOfBounds ? ' (outside terrain)' : ''}`;
+    return `${type.toUpperCase()}  X ${entry.x.toFixed(1)}  Z ${entry.z.toFixed(1)}\n${hs}`;
+  }
+
+  function refreshMarkerLook(entry){
+    const div = entry.marker.getElement() && entry.marker.getElement().querySelector('.pra-marker');
+    if (div) div.classList.toggle('manual', entry.y != null);
+  }
+
+  function openMarkerPopup(type, entry){
+    const mh = markerHeight(entry);
+    const box = document.createElement('div');
+    box.className = 'mk-pop';
+    box.innerHTML = `<div class="ttl">${type.toUpperCase()} marker</div>
+      <div>X ${entry.x.toFixed(1)}  Z ${entry.z.toFixed(1)}</div>
+      <div style="margin-top:4px;color:var(--text-dim)">Terrain Y: ${state.terrain ? round2(sampleHeight(entry.x, entry.z).height).toFixed(2) : 'n/a'}</div>
+      <div class="row"><input type="number" step="0.01" class="mkY" placeholder="Y"><button class="mkSet primary">Set</button></div>
+      <div class="row"><button class="mkReset">Use terrain</button><button class="mkDel">Remove</button></div>`;
+    const inp = box.querySelector('.mkY');
+    inp.value = mh.h != null ? mh.h.toFixed(2) : '';
+    const apply = ()=>{
+      const v = parseFloat(inp.value);
+      if (isNaN(v)){ inp.focus(); return; }
+      entry.y = round2(v);
+      refreshMarkerLook(entry);
+      entry.marker.closePopup();
+    };
+    box.querySelector('.mkSet').addEventListener('click', apply);
+    inp.addEventListener('keydown', ev=>{ if (ev.key === 'Enter') apply(); });
+    box.querySelector('.mkReset').addEventListener('click', ()=>{
+      entry.y = null; refreshMarkerLook(entry); entry.marker.closePopup();
+    });
+    box.querySelector('.mkDel').addEventListener('click', ()=> removeMarker(type, entry));
+    entry.marker.unbindPopup().bindPopup(box, { closeButton: true, offset: [0,-6] }).openPopup();
+    setTimeout(()=>{ inp.focus(); inp.select(); }, 0);
+  }
+
+  function plantMarker(type, entry){
     const color = type === 'from' ? 'var(--green)' : 'var(--red)';
     const icon = L.divIcon({
-      className: '', html: `<div class="pra-marker" style="background:${color}"></div>`,
+      className: '', html: `<div class="pra-marker${entry.y != null ? ' manual' : ''}" style="background:${color}"></div>`,
       iconSize: [14,14], iconAnchor: [7,7]
     });
-    const marker = L.marker(worldToLatLng(x, z, window._worldSize), { icon, interactive: true }).addTo(map);
-    marker.bindTooltip(`${type.toUpperCase()}  X ${x.toFixed(1)}  Z ${z.toFixed(1)}`, { direction: 'top', offset: [0,-8] });
+    const marker = L.marker(worldToLatLng(entry.x, entry.z, window._worldSize), { icon, interactive: true }).addTo(map);
+    marker.bindTooltip(() => tipText(type, entry), { direction: 'top', offset: [0,-8] });
+    marker.on('click', ev=>{
+      L.DomEvent.stopPropagation(ev);
+      marker.closeTooltip();
+      openMarkerPopup(type, entry);
+    });
     return marker;
   }
 
   function addMarker(type, x, z){
-    const marker = plantMarker(type, x, z);
-    const entry = { x, z, marker };
-    marker.on('click', (ev)=>{
-      L.DomEvent.stopPropagation(ev);
-      removeMarker(type, entry);
-    });
+    const entry = { x, z, y: null, marker: null };
+    entry.marker = plantMarker(type, entry);
     (type === 'from' ? fromMarkers : toMarkers).push(entry);
     updateMarkerCounts();
   }
@@ -683,14 +741,14 @@
     if ([sizeX, sizeY, sizeZ].some(v => isNaN(v))){ el('genStatus').innerHTML = `<span class="err">Size X/Y/Z must be numbers.</span>`; return; }
     if (!fromMarkers.length){ el('genStatus').innerHTML = `<span class="err">Add at least one FROM marker.</span>`; return; }
     if (!toMarkers.length){ el('genStatus').innerHTML = `<span class="err">Add at least one TO marker.</span>`; return; }
-    if (!state.terrain){ el('genStatus').innerHTML = `<span class="err">Terrain not loaded yet — check token/map.</span>`; return; }
+    if (!state.terrain && [...fromMarkers, ...toMarkers].some(m => m.y == null)){ el('genStatus').innerHTML = `<span class="err">Terrain not loaded yet — check token/map (or give every marker a manual height).</span>`; return; }
 
     const PRABoxes = fromMarkers.map(m => [
       [sizeX, sizeY, sizeZ],
       [0, 0, 0],
-      [round2(m.x), heightAt(m.x, m.z), round2(m.z)]
+      [round2(m.x), m.y != null ? m.y : heightAt(m.x, m.z), round2(m.z)]
     ]);
-    const safePositions3D = toMarkers.map(m => [round2(m.x), heightAt(m.x, m.z), round2(m.z)]);
+    const safePositions3D = toMarkers.map(m => [round2(m.x), m.y != null ? m.y : heightAt(m.x, m.z), round2(m.z)]);
 
     const payload = { areaName, PRABoxes, safePositions3D };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });

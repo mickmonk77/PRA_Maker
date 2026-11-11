@@ -46,6 +46,12 @@
     font-size:10px;letter-spacing:.12em;text-transform:uppercase;
     color:var(--olive);margin:0 0 10px;font-weight:600;
   }
+  .section h2{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;}
+  .section h2::before{content:"\25BE";font-size:11px;color:var(--text-dim);width:10px;display:inline-block;transition:transform .15s;}
+  .section.collapsed h2{margin-bottom:0;}
+  .section.collapsed h2::before{transform:rotate(-90deg);}
+  .section.collapsed > :not(h2){display:none;}
+  .section h2 .badge{margin-left:auto;font-size:10px;letter-spacing:.06em;text-transform:none;font-weight:400;}
   label{display:block;font-size:11px;color:var(--text-dim);margin:10px 0 4px;}
   label:first-child{margin-top:0;}
   select{
@@ -110,8 +116,8 @@
     <h1>PRA Teleport Exporter</h1>
     <div class="sub">Click FROM/TO points on the map, export a PRA teleport JSON.</div>
 
-    <div class="section">
-      <h2>1 — GitHub access</h2>
+    <div class="section" id="ghSection">
+      <h2>1 — GitHub access<span class="badge" id="ghBadge"></span></h2>
       <label>Tiles/data token</label>
       <input type="password" id="ghToken" placeholder="ghp_...">
       <label>Heightmap token</label>
@@ -228,19 +234,45 @@
       if (!res.ok) return { status: 'error', message: `GitHub error ${res.status}` };
 
       const data = await res.json();
+      if (Array.isArray(data)){
+        return { status: 'error', message: `"${path}" is a folder in the repo, not a file` };
+      }
       if (data.content && data.encoding === 'base64'){
         return { status: 'ok', bytes: b64ToBytes(data.content) };
       }
+      let detail = `type=${data.type}, size=${data.size}, encoding=${data.encoding}`;
       if (data.sha){
         const blobUrl = `https://api.github.com/repos/${GH_OWNER}/${repo}/git/blobs/${data.sha}`;
-        const blobRes = await fetch(blobUrl, { headers: ghApiHeaders(token), signal });
-        if (!blobRes.ok) return { status: 'error', message: `GitHub error ${blobRes.status}` };
-        const blob = await blobRes.json();
-        if (blob.content && blob.encoding === 'base64'){
-          return { status: 'ok', bytes: b64ToBytes(blob.content) };
+        try{
+          const blobRes = await fetch(blobUrl, { headers: ghApiHeaders(token), signal });
+          if (blobRes.ok){
+            const blob = await blobRes.json();
+            if (blob.content && blob.encoding === 'base64'){
+              return { status: 'ok', bytes: b64ToBytes(blob.content) };
+            }
+            detail += `; blob encoding=${blob.encoding}`;
+          } else {
+            detail += `; blob HTTP ${blobRes.status}`;
+          }
+        } catch(err){
+          if (err && err.name === 'AbortError') throw err;
+          detail += `; blob error: ${err.message}`;
+        }
+        // Last resort: ask the Contents API for the raw bytes directly (up to 100MB)
+        try{
+          const rawRes = await fetch(url, {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw+json' }, signal
+          });
+          if (rawRes.ok){
+            return { status: 'ok', bytes: new Uint8Array(await rawRes.arrayBuffer()) };
+          }
+          detail += `; raw HTTP ${rawRes.status}`;
+        } catch(err){
+          if (err && err.name === 'AbortError') throw err;
+          detail += `; raw error: ${err.message}`;
         }
       }
-      return { status: 'error', message: 'Could not read file content from GitHub' };
+      return { status: 'error', message: `Could not read file content from GitHub (${detail})` };
     } catch(err){
       if (err && err.name === 'AbortError') return { status: 'stale' };
       return { status: 'error', message: (err && err.message) || 'network error' };
@@ -282,6 +314,26 @@
 
   const el = id => document.getElementById(id);
 
+  // ---------- collapsible sections ----------
+  document.querySelectorAll('.section > h2').forEach(h=>{
+    h.addEventListener('click', ()=> h.parentElement.classList.toggle('collapsed'));
+  });
+
+  // GitHub section: collapses once BOTH tokens authenticate, expands if either fails
+  const ghAuth = { tiles: null, terrain: null };   // null = unknown, true = ok, false = failed
+  function updateGhSection(){
+    const sec = el('ghSection'), badge = el('ghBadge');
+    if (ghAuth.tiles === false || ghAuth.terrain === false){
+      sec.classList.remove('collapsed');
+      badge.innerHTML = '<span class="err">token problem</span>';
+    } else if (ghAuth.tiles === true && ghAuth.terrain === true){
+      sec.classList.add('collapsed');
+      badge.innerHTML = '<span class="ok">\u2713 connected</span>';
+    } else {
+      badge.textContent = '';
+    }
+  }
+
   el('ghToken').value = localStorage.getItem(LS_TOKEN_KEY) || '';
   el('ghToken').addEventListener('change', ()=>{
     localStorage.setItem(LS_TOKEN_KEY, ghToken());
@@ -316,12 +368,14 @@
       if (result.status === 'stale') return undefined;
       if (result.status === 'missing'){ tileCache[path] = null; return null; }
       if (result.status === 'error'){
+        ghAuth.tiles = false; updateGhSection();
         if (!window._ghTileWarned){
           window._ghTileWarned = true;
           el('status').innerHTML = `<span class="err">Tile load failed: ${result.message}</span>`;
         }
         return undefined;
       }
+      if (ghAuth.tiles !== false){ ghAuth.tiles = true; updateGhSection(); }
       const blob = new Blob([result.bytes], { type: 'image/webp' });
       const objUrl = URL.createObjectURL(blob);
       tileCache[path] = objUrl;
@@ -409,15 +463,18 @@
 
   async function loadTerrainForMap(mapName){
     state.terrain = null;
+    ghAuth.terrain = null; updateGhSection();
     const fname = TERRAIN_FILES[mapName];
     if (!fname) return;
     if (!ghTokenTerrain()){ el('terrainStatus').innerHTML = ''; return; }
     el('terrainStatus').innerHTML = `<span class="warn">Loading terrain…</span>`;
     const result = await ghFetchBytes(GH_REPO_TERRAIN, fname);
     if (result.status !== 'ok'){
+      ghAuth.terrain = false; updateGhSection();
       el('terrainStatus').innerHTML = `<span class="err">Terrain load failed: ${result.message || result.status}</span>`;
       return;
     }
+    ghAuth.terrain = true; updateGhSection();
     try{
       const text = new TextDecoder('utf-8').decode(result.bytes);
       const data = JSON.parse(text);
@@ -447,6 +504,7 @@
   // ---------- map init ----------
   function initMap(){
     window._ghTileWarned = false;
+    ghAuth.tiles = null; updateGhSection();
     const cfg = MAP_DEFAULTS[currentMap];
     if (map) { map.remove(); map = null; }
 

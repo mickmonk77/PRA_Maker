@@ -168,8 +168,10 @@
         <button id="clearToBtn">Clear TO</button>
       </div>
       <button id="clearAllBtn">Clear all</button>
+      <button id="importBtn">Import PRA JSON…</button>
+      <input type="file" id="importFile" accept=".json,application/json" multiple style="display:none">
       <div id="markerStatus">FROM: 0   TO: 0</div>
-      <div class="hint">Click FROM or TO, then click the map to drop markers — no limit. Hover a marker to see its height. Click a marker to set a manual height, reset it to terrain, or remove it. Markers with a manual height have a white ring and export that height.</div>
+      <div class="hint">Click FROM or TO, then click the map to drop markers — no limit. Hover a marker to see its height. Drag any marker to move it. Click a marker to set a manual height, reset it to terrain, or remove it. Import existing PRA JSON files (button or drop onto the page) to load their markers; imports add to what is already on the map. Markers with a manual height have a white ring and export that height.</div>
     </div>
 
     <div class="section">
@@ -687,18 +689,30 @@
       className: '', html: `<div class="pra-marker${entry.y != null ? ' manual' : ''}" style="background:${color}"></div>`,
       iconSize: [14,14], iconAnchor: [7,7]
     });
-    const marker = L.marker(worldToLatLng(entry.x, entry.z, window._worldSize), { icon, interactive: true }).addTo(map);
+    const marker = L.marker(worldToLatLng(entry.x, entry.z, window._worldSize), { icon, interactive: true, draggable: true }).addTo(map);
     marker.bindTooltip(() => tipText(type, entry), { direction: 'top', offset: [0,-8] });
     marker.on('click', ev=>{
       L.DomEvent.stopPropagation(ev);
       marker.closeTooltip();
       openMarkerPopup(type, entry);
     });
+    marker.on('dragstart', ()=>{ marker.closePopup(); });
+    marker.on('drag', ()=>{
+      const w = latLngToWorld(marker.getLatLng(), window._worldSize);
+      entry.x = w.x; entry.z = w.z;
+      el('coordsBox').textContent = `X ${w.x.toFixed(0)}   Z ${w.z.toFixed(0)}`;
+      const tt = marker.getTooltip(); if (tt && marker.isTooltipOpen()) tt.update();
+    });
+    marker.on('dragend', ()=>{
+      // the old height belonged to the old spot — take the terrain height at the new one
+      if (entry.y != null){ entry.y = null; refreshMarkerLook(entry); }
+      const tt = marker.getTooltip(); if (tt && marker.isTooltipOpen()) tt.update();
+    });
     return marker;
   }
 
   function addMarker(type, x, z){
-    const entry = { x, z, y: null, marker: null };
+    const entry = { x, z, y: null, size: null, rot: null, marker: null };
     entry.marker = plantMarker(type, entry);
     (type === 'from' ? fromMarkers : toMarkers).push(entry);
     updateMarkerCounts();
@@ -711,6 +725,77 @@
     if (idx >= 0) arr.splice(idx, 1);
     updateMarkerCounts();
   }
+
+  // ---------- import existing PRA JSON ----------
+  const isNum = v => typeof v === 'number' && isFinite(v);
+  const isVec3 = v => Array.isArray(v) && v.length >= 3 && v.slice(0,3).every(isNum);
+
+  function importPRA(data, fileName){
+    const res = { from: 0, to: 0, skipped: 0, outside: 0, areaName: data && data.areaName };
+    if (!data || typeof data !== 'object') throw new Error('not a JSON object');
+    if (!Array.isArray(data.PRABoxes) && !Array.isArray(data.safePositions3D)) throw new Error('no PRABoxes / safePositions3D found');
+    const ws = window._worldSize;
+    const check = (x, z) => { if (x < 0 || z < 0 || x > ws || z > ws) res.outside++; };
+    (data.PRABoxes || []).forEach(b=>{
+      if (!Array.isArray(b) || !isVec3(b[2])){ res.skipped++; return; }
+      const [x, y, z] = b[2];
+      addMarker('from', x, z);
+      const e = fromMarkers[fromMarkers.length - 1];
+      e.y = y;                                           // keep the file's height so re-export round-trips
+      if (isVec3(b[0])) e.size = b[0].slice(0,3);        // keep each box's own size / rotation
+      if (isVec3(b[1])) e.rot = b[1].slice(0,3);
+      refreshMarkerLook(e);
+      check(x, z); res.from++;
+    });
+    (data.safePositions3D || []).forEach(p=>{
+      if (!isVec3(p)){ res.skipped++; return; }
+      addMarker('to', p[0], p[2]);
+      const e = toMarkers[toMarkers.length - 1];
+      e.y = p[1]; refreshMarkerLook(e);
+      check(p[0], p[2]); res.to++;
+    });
+    return res;
+  }
+
+  async function importFiles(files){
+    if (!map){ return; }
+    const lines = []; let any = false;
+    const before = [...fromMarkers, ...toMarkers];
+    for (const f of files){
+      try{
+        const data = JSON.parse(await f.text());
+        const r = importPRA(data, f.name);
+        any = any || r.from + r.to > 0;
+        if (r.areaName && !el('areaName').value.trim()) el('areaName').value = r.areaName;
+        let msg = `${f.name}: ${r.from} FROM, ${r.to} TO`;
+        if (r.skipped) msg += `, ${r.skipped} skipped (bad format)`;
+        if (r.outside) msg += `\n  ⚠ ${r.outside} marker(s) outside this ${currentMap} map — wrong map selected?`;
+        lines.push(`<span class="${r.outside || r.skipped ? 'warn' : 'ok'}">${msg}</span>`);
+      } catch(err){
+        lines.push(`<span class="err">${f.name}: ${err.message}</span>`);
+      }
+    }
+    el('genStatus').innerHTML = lines.join('\n');
+    if (any){
+      const added = [...fromMarkers, ...toMarkers].filter(m => !before.includes(m));
+      const pts = added.map(m => worldToLatLng(m.x, m.z, window._worldSize));
+      if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [60, 60], maxZoom: 5 });
+    }
+  }
+
+  el('importBtn').addEventListener('click', ()=> el('importFile').click());
+  el('importFile').addEventListener('change', async ev=>{
+    const files = Array.from(ev.target.files || []);
+    ev.target.value = '';
+    if (files.length) await importFiles(files);
+  });
+  window.addEventListener('dragover', ev=>{ if (ev.dataTransfer && Array.from(ev.dataTransfer.types || []).includes('Files')) ev.preventDefault(); });
+  window.addEventListener('drop', async ev=>{
+    const files = Array.from((ev.dataTransfer && ev.dataTransfer.files) || []).filter(f => /\.json$/i.test(f.name));
+    if (!files.length) return;
+    ev.preventDefault();
+    await importFiles(files);
+  });
 
   function clearMarkers(type){
     const arr = type === 'from' ? fromMarkers : toMarkers;
@@ -744,8 +829,8 @@
     if (!state.terrain && [...fromMarkers, ...toMarkers].some(m => m.y == null)){ el('genStatus').innerHTML = `<span class="err">Terrain not loaded yet — check token/map (or give every marker a manual height).</span>`; return; }
 
     const PRABoxes = fromMarkers.map(m => [
-      [sizeX, sizeY, sizeZ],
-      [0, 0, 0],
+      m.size || [sizeX, sizeY, sizeZ],
+      m.rot || [0, 0, 0],
       [round2(m.x), m.y != null ? m.y : heightAt(m.x, m.z), round2(m.z)]
     ]);
     const safePositions3D = toMarkers.map(m => [round2(m.x), m.y != null ? m.y : heightAt(m.x, m.z), round2(m.z)]);
